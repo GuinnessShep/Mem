@@ -17,41 +17,42 @@ from extensions.annoy_ltm.turn_templates import get_turn_templates, apply_turn_t
 # parameters which can be customized in settings.json of webui
 params = {
     'annoy_output_dir': "extensions/annoy_ltm/outputs/",
-    'logger_level': 1,  # higher number is more verbose logging. 3 is really as high as any reasonable person should go for normal debugging
-    'vector_dim_override': -1,  # magic number determined by your loaded model. This parameter is here so that should some style of model in the future not include the hidden_size in the config, this can be used as a workaround.
-    'memory_retention_threshold': 0.68,  # 0-1, lower value will make memories retain longer but can cause stack to overflow and irrelevant memories to be held onto
-    'full_memory_additional_weight': 0.5,  # 0-1, smaller value is more weight here.
-    'num_memories_to_retrieve': 5,  # the number of related memories to retrieve for the full message and every keyword group generated from the message. Can cause significant slowdowns.
-    'keyword_grouping': 4,  # the number to group keywords into. Higher means harder to find an exact match, which makes matches more useful to context but too high and no memories will be returned.
-    'keyword_rarity_weight': 1,  # Throttles the weight applied to memories favoring unique phrases and vocabulary.
-    'maximum_memory_stack_size': 50,  # just a cap on the stack so it doesn't blow.
-    'prompt_memory_ratio': 0.4  # the ratio of prompt after the character context is applied that will be dedicated for memories.
+    'logger_level': 1, # higher number is more verbose logging. 3 is really as high as any reasonable person should go for normal debugging
+    'vector_dim_override': -1, # magic number determined by your loaded model. This parameter is here so that should some style of model in the future not include the hidden_size in the config, this can be used as a workaround.
+    'memory_retention_threshold': 0.68, # 0-1, lower value will make memories retain longer but can cause stack to overflow and irrelevant memories to be held onto
+    'full_memory_additional_weight': 0.5, # 0-1, smaller value is more weight here.
+    'num_memories_to_retrieve': 5, # the number of related memories to retrieve for the full message and every keyword group generated from the message. Can cause significant slowdowns.
+    'keyword_grouping': 4, # the number to group keywords into. Higher means harder to find an exact match, which makes matches more useful to context but too high and no memories will be returned.
+    'keyword_rarity_weight': 1, # Throttles the weight applied to memories favoring unique phrases and vocabulary.
+    'maximum_memory_stack_size': 50, # just a cap on the stack so it doesn't blow.
+    'prompt_memory_ratio': 0.4 # the ratio of prompt after the character context is applied that will be dedicated for memories.
 }
 
-# --------------- Logger ---------------
+#--------------- Logger ---------------
 def logger(msg: str, lvl=5):
     if params['logger_level'] >= lvl:
         print(msg)
 
-# --------------- Spacy NLP ---------------
+#--------------- Spacy NLP ---------------
 nlp = spacy.load("en_core_web_sm", disable=["parser"])
 
-# --------------- Custom Prompt Generator ---------------
+#--------------- Custom Prompt Generator ---------------
 
 class ChatGenerator:
     def __init__(self):
         self.memory_stack = deque()
         self.keyword_tally = KeywordTally()
 
-    # --------------- Hidden Size Helper -------------
+    #--------------- Hidden Size Helper -------------
     def _get_hidden_size(self):
         if params['vector_dim_override'] != -1:
             return params['vector_dim_override']
-
+        
         try:
             return shared.model.model.config.hidden_size
         except AttributeError:
-            return len(generate_embeddings('generate a set of embeddings to determine size of result list', logger=logger))
+            return len(generate_embeddings('generate a set of embeddings to determine the size of the result list', logger=logger))
+
 
     def preprocess_and_extract_keywords(self, text):
         text_to_process = remove_username_and_timestamp(text)
@@ -68,8 +69,8 @@ class ChatGenerator:
         keywords = lemmatized_tokens + named_entities
 
         return keywords
-
-    # --------------- Memory ---------------
+        
+    #--------------- Memory ---------------
     def evaluate_memory_relevance(self, memory, conversation, min_relevance_threshold=0.2):
         memory_text = ''.join([user_mem + '\n' + bot_mem for user_mem, bot_mem in memory])
         conversation_text = ''.join(conversation)
@@ -87,16 +88,8 @@ class ChatGenerator:
         logger(f"manually computed cosine similarity: {cosine_similarity_value}", 5)
         return cosine_similarity_value >= min_relevance_threshold
 
-    def retrieve_related_memories(
-        self,
-        annoy_index,
-        input_messages,
-        history_rows,
-        index_to_history_position,
-        keyword_tally,
-        num_related_memories=3,
-        weight=0.5
-    ):
+
+    def retrieve_related_memories(self, annoy_index, input_messages, history_rows, index_to_history_position, keyword_tally, num_related_memories=3, weight=0.5):
         return_memories = set()
         for input_str in input_messages:
             logger(f"retrieving memories for <input> {input_str} </input>", 3)
@@ -128,7 +121,7 @@ class ChatGenerator:
                 results_distances.extend(distances)
 
             if len(results_indices) == 0:
-                return []  # If we don't have any results, not much point in progressing.
+                return [] # If we don't have any results, not much point in progressing.
 
             # 1. Combine the results
             indices_distances = list(zip(results_indices, results_distances))
@@ -146,9 +139,11 @@ class ChatGenerator:
                 else:
                     history_positions_distances[history_position] = [distance]
 
+            
             weighted_history_positions = [(pos, min(distances) / len(distances)) for pos, distances in history_positions_distances.items()]
 
             return_memories.update(set(weighted_history_positions))
+            # return_memories.extend(weighted_history_positions)
 
         # 4. Get the related memories using the new sorted list
         related_memories = [(pos, shared.history['internal'][max(0, pos - 1):pos + 1], distance) for pos, distance in list(return_memories)]
@@ -179,6 +174,8 @@ class ChatGenerator:
 
         return non_duplicate_memories
 
+
+
     def build_memory_rows(self, history_rows, user_input, max_memory_length, turn_templates, relevance_threshold=0.2):
         user_turn, bot_turn = turn_templates
 
@@ -208,81 +205,100 @@ class ChatGenerator:
         last_index = 0
         last_memory_rows_count = 0
 
-        logger(f"\nStarting: {memory_len} / {max_memory_length} Memory Index: {memory_index}", 5)
+        while memory_index < len(new_memory_stack) and memory_len < max_memory_length:
+            index, memory, _ = new_memory_stack[memory_index]
+            new_memory_len = memory_len
 
-        while memory_len < max_memory_length and memory_index < len(new_memory_stack):
-            memory = new_memory_stack[memory_index][1]
-            logger(f"\n\nAdding Memory {memory_index}/{len(new_memory_stack)}")
-            logger(f"Memory: {memory}", 5)
-            memory_len += len(memory) + 2  # +2 to account for the user and bot turns
+            i = len(memory) - 1
+            while i >= 0 and new_memory_len < max_memory_length:
+                row = memory[i]
+                new_memory_len += len(row) + 1
+                i -= 1
 
-            if memory_len <= max_memory_length:
-                memory_rows.extend(memory)
-                memory_rows.extend([user_turn, bot_turn])
-                returned_memories += 1
-
-            last_index = memory_index
+            if new_memory_len > max_memory_length:
+                if returned_memories == 0:
+                    logger(f"memory length {memory_len} max memory length {max_memory_length}", 2)
+                    # We have room for something so we should return something
+                    last_index = i + 1
+                    memory_rows.extend(memory[last_index:])
+                    returned_memories = last_memory_rows_count - len(memory[last_index:])
+            else:
+                memory_len = new_memory_len
+                last_memory_rows_count = len(memory)
             memory_index += 1
-            last_memory_rows_count = len(memory_rows)
 
-        if len(memory_rows) > 0:
-            memory_rows.pop()  # Remove the last bot turn
+        if memory_index < len(new_memory_stack):
+            logger(f"Hit max memory length of {max_memory_length} before adding all memories", 2)
+            logger(f"Memory index: {memory_index} Memory length: {memory_len}", 2)
+        elif memory_len >= max_memory_length:
+            logger(f"Max memory length of {max_memory_length} reached", 2)
+            logger(f"Memory index: {memory_index} Memory length: {memory_len}", 2)
 
-        logger(f"MEMORY_ROWS: {memory_rows}", 4)
-        logger(f"MEMORY_ROWS_SIZE: {len(memory_rows)}", 3)
-        logger(f"RETURNED MEMORIES: {returned_memories}", 3)
+        if memory_len < max_memory_length:
+            memory_rows.extend([user_turn, bot_turn] + [row for _, row, _ in new_memory_stack[memory_index:]])
 
+        self.memory_stack = deque(new_memory_stack[memory_index:])
+        logger(f"MEMORY_ROWS:{memory_rows}", 5)
         return memory_rows
 
-    def generate_prompt(self, user_input):
-        max_prompt_length = get_max_prompt_length(params)
-        logger(f"MAX_PROMPT_LENGTH: {max_prompt_length}", 3)
 
-        # Get the turn templates
-        turn_templates = get_turn_templates(shared.turns)
-        logger(f"TURN_TEMPLATES: {turn_templates}", 3)
+    #--------------- Generate ---------------
+    def generate(self, user_input):
+        user_input = remove_username_and_timestamp(user_input)
 
-        # Build the memory rows
-        memory_rows = self.build_memory_rows(shared.history['internal'], user_input, max_prompt_length, turn_templates, params['memory_retention_threshold'])
-        logger(f"memory_rows: {memory_rows}", 4)
+        # Process user input and extract keywords
+        keywords = self.preprocess_and_extract_keywords(user_input)
+
+        # Update the keyword tally
+        self.keyword_tally.update(keywords)
 
         # Update the memory stack
-        self.memory_stack.extend(memory_rows)
-        self.memory_stack = self.memory_stack[-params['maximum_memory_stack_size']:]
+        self.memory_stack.append((user_input, ""))
 
-        # Retrieve related memories
-        annoy_index = AnnoyIndex(self._get_hidden_size())
-        annoy_index.load(params['annoy_output_dir'] + 'index.ann')
-        metadata = load_metadata(params['annoy_output_dir'])
-        keyword_tally = KeywordTally(metadata['keyword_tally'])
-        related_memories = self.retrieve_related_memories(
-            annoy_index,
-            [user_input],
-            shared.history['internal'],
-            metadata['index_to_history_position'],
-            keyword_tally,
-            num_related_memories=params['num_memories_to_retrieve'],
-            weight=params['full_memory_additional_weight']
-        )
-        logger(f"RELATED_MEMORIES: {related_memories}", 3)
+        # Generate the response
+        response = shared.model.generate(
+            user_input,
+            memory=self.memory_stack,
+            keyword_tally=self.keyword_tally,
+            params=params
+        )[0]
 
-        for memory_index, memory, distance in related_memories:
-            self.memory_stack.extend(memory)
-            self.memory_stack = self.memory_stack[-params['maximum_memory_stack_size']:]
+        # Extract the bot reply from the generated response
+        bot_reply = response['generated_text']
 
-        # Encode the user input
-        user_input_encoded = encode(user_input)
-        logger(f"USER_INPUT_ENCODED: {user_input_encoded}", 3)
+        # Update the memory stack with the bot reply
+        self.memory_stack[-1] = (user_input, bot_reply)
 
-        # Generate the prompt
-        prompt = f"{user_input_encoded}{self.memory_stack[-max_prompt_length:]}"
-        logger(f"PROMPT: {prompt}", 4)
+        return bot_reply
 
-        return prompt
 
-chat_generator = ChatGenerator()
+#--------------- Main ---------------
+if __name__ == "__main__":
+    shared.init()
 
-# Example usage
-user_input = "Hello, how are you?"
-prompt = chat_generator.generate_prompt(user_input)
-print(f"Generated Prompt: {prompt}")
+    # Load the Annoy index and metadata
+    annoy_index = AnnoyIndex(params['vector_dim_override'])
+    annoy_index.load(f"{params['annoy_output_dir']}annoy.index")
+
+    metadata = load_metadata()
+
+    if not check_hashes(annoy_index, metadata):
+        logger("Index and metadata hashes do not match. Regenerating index...")
+        compute_hashes(annoy_index, metadata)
+        annoy_index.unload()
+        annoy_index.load(f"{params['annoy_output_dir']}annoy.index")
+        save_metadata(metadata)
+        logger("Index regenerated successfully.")
+
+    # Create a new instance of the chat generator
+    chat_generator = ChatGenerator()
+
+    while True:
+        user_input = input("You: ")
+        if user_input == "exit":
+            break
+
+        # Generate the bot's response
+        bot_reply = chat_generator.generate(user_input)
+        print("Bot:", bot_reply)
+        print()
